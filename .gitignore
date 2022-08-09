@@ -1,0 +1,16 @@
+datasets/
+checkpoints/
+
+# compilation and distribution
+__pycache__
+*.egg-info/
+build/
+dist/
+
+/pretrained
+
+/datasets
+# d2 output dir
+output
+
+.vscode/
