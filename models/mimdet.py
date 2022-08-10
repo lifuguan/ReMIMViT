@@ -15,7 +15,8 @@ import torch.utils.checkpoint as cp
 from detectron2.layers import ShapeSpec
 from detectron2.modeling.backbone import Backbone
 from timm.models.layers import to_2tuple
-from timm.models.vision_transformer import Block
+from .vision_transformer import Block
+# from timm.models.vision_transformer import Block
 
 from utils.pos_embed import (
     get_2d_sincos_pos_embed,
@@ -141,6 +142,13 @@ class MIMDetEncoder(nn.Module):
         )
         self.norm = norm_layer(embed_dim)
 
+        self.thresh = 0.6
+
+        self.score_layer = Block(
+                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, drop_path=dpr[-1], norm_layer=norm_layer)
+        self.score_norm = norm_layer(embed_dim, eps=1e-6)
+        self.score_head = nn.Linear(embed_dim, 1)
+
         self.initialize_weights(pretrained)
 
     def initialize_weights(self, pretrained):
@@ -183,13 +191,14 @@ class MIMDetEncoder(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def random_masking(self, x, sample_ratio, masks):
+    def random_masking(self, x, sample_ratio, masks): # （4, 2700, 768)    (4, 50, 54)
         N, L, D = x.shape
         masks_flatten = masks[0].flatten(1)
         assert masks_flatten.shape[1] == L
         len_keep = int(L * sample_ratio)
 
-        noise = torch.rand(N, L, device=x.device)
+        # 随机生成噪声，并在padding区域补100
+        noise = torch.rand(N, L, device=x.device)  # (4, 2700)
         noise = noise.masked_fill(masks_flatten, 100)
 
         # sort noise for each sample
@@ -198,11 +207,12 @@ class MIMDetEncoder(nn.Module):
 
         # keep the first subset
         ids_keep = ids_keep[:, :len_keep]
-        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D)) # 收集前50%的query
 
         return x_masked, ids_restore
 
     def mask_out_padding(self, feature_shapes, image_sizes, device):
+        # 每张图像，多余部分补1，自身区域为0
         masks = []
         for idx, shape in enumerate(feature_shapes):
             N, _, H, W = shape
@@ -222,7 +232,7 @@ class MIMDetEncoder(nn.Module):
         outputs = self.patch_embed(imgs.tensor)
         x = outputs[-1]
         H, W = x.shape[-2:]
-        masks = self.mask_out_padding([x.shape], imgs.image_sizes, imgs.tensor.device)
+        masks = self.mask_out_padding([x.shape], imgs.image_sizes, imgs.tensor.device) # (4, 46, 60)
         x = x.flatten(2).transpose(1, 2)
         pos_embed = interpolate_pos_embed_online(
             self.pos_embed, self.patch_embed.grid_size, (H, W), 1
@@ -231,13 +241,42 @@ class MIMDetEncoder(nn.Module):
 
         x, ids_restore = self.random_masking(x, sample_ratio, masks)
 
+        attn_weights = []
         if self.checkpointing and x.requires_grad:
             for blk in self.blocks:
-                x = cp.checkpoint(blk, x)
+                x, weights = cp.checkpoint(blk, x) # 
+                attn_weights.append(weights)
         else:
             for blk in self.blocks:
-                x = blk(x)
-        x = self.norm(x)
+                x, weights = blk(x)
+                attn_weights.append(weights)
+
+        bz,seq_num,feat_num = x.size()
+
+        # Token Perliminary Attention (class token and patch token)
+        weight_plc = torch.zeros(bz,seq_num-1,dtype=weights.dtype, device=weights.device)
+        for weights in attn_weights:
+            weight_plc += weights[:,:,0,1:].mean(dim=1)
+        weight_plc = weight_plc / weight_plc.sum(dim=1, keepdim=True)
+
+        #cumsum
+        wval, wind = weight_plc.sort(dim=1, descending=True)
+        wval_cum   = wval.cumsum(dim=1)
+        wval_policy= (wval_cum < self.thresh) .to(torch.float16).view(bz,seq_num-1)  # 占据80%重要性的token进行re-attention，剩余20%重要性的token不进行舍弃 
+
+        part_policy= torch.zeros(bz,seq_num-1,dtype=wval_policy.dtype, device=wval_policy.device)
+        #part_policy = part_policy.scatter(1,(wval_policy*wind).long(),1.) # 挑选出wval_policy为1的wind系数，对应构建part_policy
+        part_policy = part_policy.scatter(dim=1,index=wind,src=wval_policy)
+        
+        score_tokens, _ = self.score_layer(x[:,1:], part_policy)   
+        score_tokens= self.score_norm(score_tokens)
+        scores      = self.score_head(score_tokens)
+        scores      = scores.exp_() * part_policy.unsqueeze(-1)
+        scores      = (scores) / (scores.sum(dim=1, keepdim=True) + 1e-6)
+
+        select_tokens = torch.cat([x[:,0].unsqueeze(1), x[:,1:] * scores.expand(bz, seq_num-1, feat_num)], dim=1)
+        
+        x = self.norm(select_tokens)
         outputs.append(x)
         x = outputs
 
@@ -348,10 +387,10 @@ class MIMDetDecoder(nn.Module):
         x = x + pos_embed
         if self.checkpointing and x.requires_grad:
             for blk in self.decoder_blocks:
-                x = cp.checkpoint(blk, x)
+                x, attn_weights = cp.checkpoint(blk, x)
         else:
             for blk in self.decoder_blocks:
-                x = blk(x)
+                x, attn_weights = blk(x)
         if self.checkpointing and x.requires_grad:
             x = cp.checkpoint(self.decoder_norm, x)
         else:
