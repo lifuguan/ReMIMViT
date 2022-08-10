@@ -15,8 +15,8 @@ import torch.utils.checkpoint as cp
 from detectron2.layers import ShapeSpec
 from detectron2.modeling.backbone import Backbone
 from timm.models.layers import to_2tuple
-from .vision_transformer import Block
-# from timm.models.vision_transformer import Block
+from .vision_transformer import ReBlock
+from timm.models.vision_transformer import Block
 
 from utils.pos_embed import (
     get_2d_sincos_pos_embed,
@@ -129,7 +129,7 @@ class MIMDetEncoder(nn.Module):
         ]  # stochastic depth decay rule
         self.blocks = nn.ModuleList(
             [
-                Block(
+                ReBlock(
                     embed_dim,
                     num_heads,
                     mlp_ratio,
@@ -144,7 +144,7 @@ class MIMDetEncoder(nn.Module):
 
         self.thresh = 0.6
 
-        self.score_layer = Block(
+        self.score_layer = ReBlock(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, drop_path=dpr[-1], norm_layer=norm_layer)
         self.score_norm = norm_layer(embed_dim, eps=1e-6)
         self.score_head = nn.Linear(embed_dim, 1)
@@ -387,10 +387,10 @@ class MIMDetDecoder(nn.Module):
         x = x + pos_embed
         if self.checkpointing and x.requires_grad:
             for blk in self.decoder_blocks:
-                x, attn_weights = cp.checkpoint(blk, x)
+                x = cp.checkpoint(blk, x)
         else:
             for blk in self.decoder_blocks:
-                x, attn_weights = blk(x)
+                x = blk(x)
         if self.checkpointing and x.requires_grad:
             x = cp.checkpoint(self.decoder_norm, x)
         else:
