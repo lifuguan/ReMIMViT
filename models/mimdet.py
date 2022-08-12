@@ -142,7 +142,7 @@ class MIMDetEncoder(nn.Module):
         )
         self.norm = norm_layer(embed_dim)
 
-        self.thresh = 0.6
+        self.thresh = 0.95
 
         self.score_layer = ReBlock(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, drop_path=dpr[-1], norm_layer=norm_layer)

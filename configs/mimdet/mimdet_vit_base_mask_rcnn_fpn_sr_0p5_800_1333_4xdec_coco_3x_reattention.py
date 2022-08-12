@@ -192,4 +192,4 @@ model.roi_heads.box_head.conv_norm = (
     model.roi_heads.mask_head.conv_norm
 ) = lambda c: NaiveSyncBatchNorm(c, stats_mode="N")
 
-train.output_dir = "output/mimdet_vit_base_mask_rcnn_fpn_sr_0p5_800_1333_4xdec_coco_3x"
+train.output_dir = "output/mimdet_vit_base_mask_rcnn_fpn_sr_0p5_800_1333_4xdec_coco_3x_finetune"

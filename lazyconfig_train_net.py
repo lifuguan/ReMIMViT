@@ -122,9 +122,7 @@ if __name__ == "__main__":
     parser.add_argument("--master_port", default="")
     args = parser.parse_args()
     args.machine_rank = args.node_rank
-    if args.master_addr or args.master_port:
-        assert args.master_addr and args.master_port
-        args.dist_url = f"tcp://{args.master_addr}:{args.master_port}"
+
     print(args)
     launch(
         main,
