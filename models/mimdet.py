@@ -129,7 +129,7 @@ class MIMDetEncoder(nn.Module):
         ]  # stochastic depth decay rule
         self.blocks = nn.ModuleList(
             [
-                ReBlock(
+                Block(
                     embed_dim,
                     num_heads,
                     mlp_ratio,
@@ -141,13 +141,6 @@ class MIMDetEncoder(nn.Module):
             ]
         )
         self.norm = norm_layer(embed_dim)
-
-        self.thresh = 0.95
-
-        self.score_layer = ReBlock(
-                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, drop_path=dpr[-1], norm_layer=norm_layer)
-        self.score_norm = norm_layer(embed_dim, eps=1e-6)
-        self.score_head = nn.Linear(embed_dim, 1)
 
         self.initialize_weights(pretrained)
 
@@ -232,6 +225,73 @@ class MIMDetEncoder(nn.Module):
         outputs = self.patch_embed(imgs.tensor)
         x = outputs[-1]
         H, W = x.shape[-2:]
+        masks = self.mask_out_padding([x.shape], imgs.image_sizes, imgs.tensor.device)
+        x = x.flatten(2).transpose(1, 2)
+        pos_embed = interpolate_pos_embed_online(
+            self.pos_embed, self.patch_embed.grid_size, (H, W), 1
+        )[:, 1:, :]
+        x = x + pos_embed
+
+        x, ids_restore = self.random_masking(x, sample_ratio, masks)
+
+        if self.checkpointing and x.requires_grad:
+            for blk in self.blocks:
+                x = cp.checkpoint(blk, x)
+        else:
+            for blk in self.blocks:
+                x = blk(x)
+        x = self.norm(x)
+        outputs.append(x)
+        x = outputs
+
+        return x, ids_restore, (H, W)
+
+class MIMDetEncoderReAtten(MIMDetEncoder):
+    def __init__(self,
+        img_size=224,
+        patch_size=16,
+        in_chans=3,
+        embed_dim=1024,
+        depth=24,
+        num_heads=16,
+        mlp_ratio=4.0,
+        dpr=0.0,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),
+        pretrained=None,
+        checkpointing: bool = False):
+        super().__init__(img_size, patch_size, in_chans, embed_dim, depth, num_heads, mlp_ratio, dpr, norm_layer, pretrained, checkpointing)
+
+
+        dpr = [
+            x.item() for x in torch.linspace(0, dpr, depth)
+        ]  # stochastic depth decay rule
+        
+        self.blocks = nn.ModuleList(
+            [
+                ReBlock(
+                    embed_dim,
+                    num_heads,
+                    mlp_ratio,
+                    qkv_bias=True,
+                    drop_path=dpr[i],
+                    norm_layer=norm_layer,
+                )
+                for i in range(depth)
+            ]
+        )
+        self.norm = norm_layer(embed_dim)
+
+        self.thresh = 0.95
+
+        self.score_layer = ReBlock(
+                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, drop_path=dpr[-1], norm_layer=norm_layer)
+        self.score_norm = norm_layer(embed_dim, eps=1e-6)
+        self.score_head = nn.Linear(embed_dim, 1)
+
+    def forward(self, imgs, sample_ratio):
+        outputs = self.patch_embed(imgs.tensor)
+        x = outputs[-1]
+        H, W = x.shape[-2:]
         masks = self.mask_out_padding([x.shape], imgs.image_sizes, imgs.tensor.device) # (4, 46, 60)
         x = x.flatten(2).transpose(1, 2)
         pos_embed = interpolate_pos_embed_online(
@@ -280,7 +340,8 @@ class MIMDetEncoder(nn.Module):
         outputs.append(x)
         x = outputs
 
-        return x, ids_restore, (H, W)
+        return x, ids_restore, (H, W)   
+
 
 
 class MIMDetDecoder(nn.Module):

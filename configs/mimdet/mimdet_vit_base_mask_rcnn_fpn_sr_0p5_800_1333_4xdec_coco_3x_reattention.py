@@ -20,7 +20,7 @@ from detectron2.modeling.roi_heads import (
     StandardROIHeads,
 )
 
-from models import MIMDetBackbone, MIMDetDecoder, MIMDetEncoder
+from models import MIMDetBackbone, MIMDetDecoder, MIMDetEncoderReAtten
 
 from ..coco import dataloader
 from ..common import (
@@ -35,7 +35,7 @@ model = L(GeneralizedRCNNImageListForward)(
     lsj_postprocess=False,
     backbone=L(FPN)(
         bottom_up=L(MIMDetBackbone)(
-            encoder=L(MIMDetEncoder)(
+            encoder=L(MIMDetEncoderReAtten)(
                 img_size=800,
                 patch_size=16,
                 in_chans=3,
@@ -192,4 +192,4 @@ model.roi_heads.box_head.conv_norm = (
     model.roi_heads.mask_head.conv_norm
 ) = lambda c: NaiveSyncBatchNorm(c, stats_mode="N")
 
-train.output_dir = "output/mimdet_vit_base_mask_rcnn_fpn_sr_0p5_800_1333_4xdec_coco_3x_finetune"
+train.output_dir = "output/mimdet_vit_base_mask_rcnn_fpn_sr_0p5_800_1333_4xdec_coco_3x_reattention"
