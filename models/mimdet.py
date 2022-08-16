@@ -246,8 +246,9 @@ class MIMDetEncoder(nn.Module):
 
         return x, ids_restore, (H, W)
 
-class MIMDetEncoderReAtten(MIMDetEncoder):
-    def __init__(self,
+class MIMDetEncoderReAtten(nn.Module):
+    def __init__(
+        self,
         img_size=224,
         patch_size=16,
         in_chans=3,
@@ -258,14 +259,23 @@ class MIMDetEncoderReAtten(MIMDetEncoder):
         dpr=0.0,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
         pretrained=None,
-        checkpointing: bool = False):
-        super().__init__(img_size, patch_size, in_chans, embed_dim, depth, num_heads, mlp_ratio, dpr, norm_layer, pretrained, checkpointing)
+        checkpointing: bool = False,
+    ):
+        super().__init__()
 
+        self.checkpointing = checkpointing
+        self.patch_embed = ConvStem(
+            img_size, patch_size, in_chans, embed_dim, checkpointing=checkpointing
+        )
+        self.num_patches = self.patch_embed.num_patches
+
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, self.num_patches + 1, embed_dim), requires_grad=False
+        )
 
         dpr = [
             x.item() for x in torch.linspace(0, dpr, depth)
         ]  # stochastic depth decay rule
-        
         self.blocks = nn.ModuleList(
             [
                 ReBlock(
@@ -287,6 +297,85 @@ class MIMDetEncoderReAtten(MIMDetEncoder):
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, drop_path=dpr[-1], norm_layer=norm_layer)
         self.score_norm = norm_layer(embed_dim, eps=1e-6)
         self.score_head = nn.Linear(embed_dim, 1)
+
+        self.initialize_weights(pretrained)
+
+    def initialize_weights(self, pretrained):
+        # initialization
+        # initialize (and freeze) pos_embed by sin-cos embedding
+        pos_embed = get_2d_sincos_pos_embed(
+            self.pos_embed.shape[-1], int(self.num_patches ** 0.5), cls_token=True
+        )
+        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+
+        # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
+        # torch.nn.init.normal_(self.cls_token, std=0.02)
+
+        # initialize nn.Linear and nn.LayerNorm
+        self.apply(self._init_weights)
+
+        if pretrained:
+            checkpoint_model = torch.load(pretrained, map_location="cpu")["model"]
+            new_checkpoint_model = {}
+            for k, v in checkpoint_model.items():
+                if "encoder" in k:
+                    new_checkpoint_model[k.replace("encoder.", "")] = v
+                elif "module" in k:
+                    new_checkpoint_model[k.replace("module.", "")] = v
+                else:
+                    new_checkpoint_model[k] = v
+            interpolate_pos_embed(self, new_checkpoint_model, "pos_embed")
+            print(self.load_state_dict(new_checkpoint_model, strict=False))
+            print(f"Loading ViT Encoder pretrained weights from {pretrained}.")
+        else:
+            print("Loading ViT Encoder pretrained weights from scratch.")
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            # we use xavier_uniform following official JAX ViT:
+            torch.nn.init.xavier_uniform_(m.weight)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    def random_masking(self, x, sample_ratio, masks): # （4, 2700, 768)    (4, 50, 54)
+        N, L, D = x.shape
+        masks_flatten = masks[0].flatten(1)
+        assert masks_flatten.shape[1] == L
+        len_keep = int(L * sample_ratio)
+
+        # 随机生成噪声，并在padding区域补100
+        noise = torch.rand(N, L, device=x.device)  # (4, 2700)
+        noise = noise.masked_fill(masks_flatten, 100)
+
+        # sort noise for each sample
+        ids_keep = torch.argsort(noise, dim=1)
+        ids_restore = torch.argsort(ids_keep, dim=1)
+
+        # keep the first subset
+        ids_keep = ids_keep[:, :len_keep]
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D)) # 收集前50%的query
+
+        return x_masked, ids_restore
+
+    def mask_out_padding(self, feature_shapes, image_sizes, device):
+        # 每张图像，多余部分补1，自身区域为0
+        masks = []
+        for idx, shape in enumerate(feature_shapes):
+            N, _, H, W = shape
+            masks_per_feature_level = torch.ones(
+                (N, H, W), dtype=torch.bool, device=device
+            )
+            for img_idx, (h, w) in enumerate(image_sizes):
+                masks_per_feature_level[
+                    img_idx,
+                    : int(np.ceil(float(h) / self.patch_embed.patch_size[0])),
+                    : int(np.ceil(float(w) / self.patch_embed.patch_size[1])),
+                ] = 0
+            masks.append(masks_per_feature_level)
+        return masks
 
     def forward(self, imgs, sample_ratio):
         outputs = self.patch_embed(imgs.tensor)
@@ -334,14 +423,19 @@ class MIMDetEncoderReAtten(MIMDetEncoder):
         scores      = scores.exp_() * part_policy.unsqueeze(-1)
         scores      = (scores) / (scores.sum(dim=1, keepdim=True) + 1e-6)
 
+        weight_plc = weight_plc / weight_plc.sum(dim=-1, keepdim=True)
+        weight_rat = (weight_plc*part_policy).sum(dim=-1, keepdim=True)
+        scores     = scores.view(bz,seq_num-1) #* weight_plc
+        scores     = scores/ scores.sum(dim=1, keepdim=True) * weight_rat
+        scores     = scores + (1-part_policy) * weight_plc 
+        scores = scores.unsqueeze(-1)
         select_tokens = torch.cat([x[:,0].unsqueeze(1), x[:,1:] * scores.expand(bz, seq_num-1, feat_num)], dim=1)
         
         x = self.norm(select_tokens)
         outputs.append(x)
         x = outputs
 
-        return x, ids_restore, (H, W)   
-
+        return x, ids_restore, (H, W)
 
 
 class MIMDetDecoder(nn.Module):
