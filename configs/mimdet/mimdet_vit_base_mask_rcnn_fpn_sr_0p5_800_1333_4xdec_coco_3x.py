@@ -170,7 +170,7 @@ dataloader.test.mapper.augmentations = [
 ]
 
 # batch size, lr & schedules
-dataloader.train.total_batch_size = 4
+dataloader.train.total_batch_size = 32
 train.checkpointer.period = int(120000 / 64)
 train.eval_period = int(120000 / 64)
 train.max_iter = int(120000 / 64 * 36)
