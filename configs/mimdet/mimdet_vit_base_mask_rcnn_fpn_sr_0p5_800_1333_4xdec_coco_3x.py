@@ -59,7 +59,7 @@ model = L(GeneralizedRCNNImageListForward)(
                 pretrained="${..encoder.pretrained}",
                 checkpointing=True,
             ),
-            sample_ratio=0.5,
+            sample_ratio=1.0,
             size_divisibility=32,
             _out_feature_channels=[192, 384, 512, 512],
         ),
@@ -192,4 +192,4 @@ model.roi_heads.box_head.conv_norm = (
     model.roi_heads.mask_head.conv_norm
 ) = lambda c: NaiveSyncBatchNorm(c, stats_mode="N")
 
-train.output_dir = "output/mimdet_vit_base_mask_rcnn_fpn_sr_0p5_800_1333_4xdec_coco_3x"
+train.output_dir = "output/mimdet_vit_base_mask_rcnn_fpn_sr_0p5_800_1333_4xdec_coco_3x_full_ratio"
