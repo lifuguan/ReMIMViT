@@ -170,12 +170,12 @@ dataloader.test.mapper.augmentations = [
 ]
 
 # batch size, lr & schedules
-dataloader.train.total_batch_size = 32
-train.checkpointer.period = int(120000 / 64)
-train.eval_period = int(120000 / 64)
-train.max_iter = int(120000 / 64 * 36)
-lr_multiplier.scheduler.milestones = [int(120000 / 64 * 27), int(120000 / 64 * 33)]
-lr_multiplier.scheduler.num_updates = int(120000 / 64 * 36)
+dataloader.train.total_batch_size = 16
+train.checkpointer.period = int(120000 / 16)
+train.eval_period = int(120000 / 16)
+train.max_iter = int(120000 / 16 * 36)
+lr_multiplier.scheduler.milestones = [int(120000 / 16 * 27), int(120000 / 16 * 33)]
+lr_multiplier.scheduler.num_updates = int(120000 / 16 * 36)
 lr_multiplier.warmup_length = 0.25 / 36  # warmup 1/4 epochs
 lr_multiplier.warmup_factor = 0.0  # warmup from 0. * base_lr
 
