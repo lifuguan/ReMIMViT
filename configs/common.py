@@ -2,6 +2,8 @@ from typing import Dict, List, Optional
 from omegaconf import DictConfig
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from detectron2.config import LazyCall as L
 from detectron2.modeling.meta_arch import GeneralizedRCNN
 from detectron2.solver import WarmupParamScheduler
@@ -16,6 +18,7 @@ class GeneralizedRCNNImageListForward(GeneralizedRCNN):
     def __init__(self, *args, **kwargs):
         self.lsj_postprocess = kwargs.pop("lsj_postprocess")
         super().__init__(*args, **kwargs)
+        self.cls_head = nn.Linear(256, 80)
 
     def forward(self, batched_inputs: List[Dict[str, torch.Tensor]]):
         if not self.training:
@@ -28,6 +31,14 @@ class GeneralizedRCNNImageListForward(GeneralizedRCNN):
             gt_instances = None
 
         features = self.backbone(images)
+
+        if self.training == True:
+            output = features['p6']
+            output = output.mean(-1).mean(-1)
+            output = self.cls_head(output)
+
+            backbone_losses = self.cls_losses(output, gt_instances)
+
 
         if self.proposal_generator is not None:
             proposals, proposal_losses = self.proposal_generator(
@@ -45,9 +56,20 @@ class GeneralizedRCNNImageListForward(GeneralizedRCNN):
                 self.visualize_training(batched_inputs, proposals)
 
         losses = {}
+        losses.update(backbone_losses)
         losses.update(detector_losses)
         losses.update(proposal_losses)
         return losses
+
+    @torch.jit.unused
+    def cls_losses(self, output, gt_instances):
+        target = torch.zeros(output.size(0), 80).to(device=output.device)
+        for i, gt_ins in enumerate(gt_instances):
+            for label in gt_ins._fields['gt_classes']:
+                target[i][label] = 1
+        backbone_losses = F.multilabel_soft_margin_loss(output, target)
+
+        return {'reatten_loss':backbone_losses}
 
     def inference(
         self,
